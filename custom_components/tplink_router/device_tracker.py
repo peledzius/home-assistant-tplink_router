@@ -7,7 +7,8 @@ import logging
 import re
 from Crypto.PublicKey.RSA import construct
 from Crypto.Cipher import PKCS1_v1_5
-from Crypto.Cipher import AES, PKCS1_OAEP
+from Crypto.Cipher import AES
+from Crypto.Cipher import PKCS1_OAEP
 from Crypto.Util.Padding import pad, unpad
 import binascii
 import string, random
@@ -49,7 +50,8 @@ PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend({
 
 def get_scanner(hass, config):
     """Validate the configuration and return a TP-Link scanner."""
-    for cls in [VR600TplinkDeviceScanner,
+    for cls in [WR841NTplinkDeviceScanner,
+                VR600TplinkDeviceScanner,
                 EAP225TplinkDeviceScanner,
                 N600TplinkDeviceScanner,
                 C7TplinkDeviceScanner,
@@ -547,7 +549,7 @@ class VR600TplinkDeviceScanner(TplinkDeviceScanner):
         response = requests.post(url, headers=headers)
 
         if not response.status_code == 200:
-            _LOGGER.error("Error %s from router", page.response)
+            _LOGGER.error("Error %s from router", response.text)
             return False
 
         self.jsessionId = dict(response.cookies)['JSESSIONID']
@@ -570,7 +572,7 @@ class VR600TplinkDeviceScanner(TplinkDeviceScanner):
         response = requests.get(url, headers=headers, cookies=cookies)
 
         if not response.status_code == 200:
-            _LOGGER.error("Error %s from router", page.response)
+            _LOGGER.error("Error %s from router", response.text)
             return False
 
         split = response.text.index('var token=') + len('var token=\"') 
