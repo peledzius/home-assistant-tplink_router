@@ -7,9 +7,12 @@ import logging
 import re
 from Crypto.PublicKey.RSA import construct
 from Crypto.Cipher import PKCS1_v1_5
+from Crypto.Cipher import AES, PKCS1_OAEP
+from Crypto.Util.Padding import pad, unpad
 import binascii
 import string, random
 import time
+import typing, hashlib, math
 
 from aiohttp.hdrs import (
     ACCEPT,
@@ -673,7 +676,7 @@ class WR841NTplinkDeviceScanner(TplinkDeviceScanner):
     """This class queries an TL-WR841N router with TP-Link firmware."""
     """Adopted from https://github.com/0xf15h/tp_link_gdpr """
 
-    def __init__(self):
+    def __init__(self, config):
         """Initialize the scanner."""
         self.BLOCK_SIZE: int = 16
         self.AES_KEY: str = (str(int(time.time() * 1000)) + "" + str(random.random() * 1000000000))[0:self.BLOCK_SIZE]
