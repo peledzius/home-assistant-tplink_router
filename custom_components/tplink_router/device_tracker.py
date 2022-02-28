@@ -668,3 +668,248 @@ class VR600TplinkDeviceScanner(TplinkDeviceScanner):
             self.token = ''
             return False
         return True
+   
+class WR841NTplinkDeviceScanner(TplinkDeviceScanner):
+    """This class queries an TL-WR841N router with TP-Link firmware."""
+    """Adopted from https://github.com/0xf15h/tp_link_gdpr """
+
+    def __init__(self):
+        """Initialize the scanner."""
+        self.BLOCK_SIZE: int = 16
+        self.AES_KEY: str = (str(int(time.time() * 1000)) + "" + str(random.random() * 1000000000))[0:self.BLOCK_SIZE]
+        self.AES_IV: str = (str(int(time.time() * 1000)) + "" + str(random.random() * 1000000000))[0:self.BLOCK_SIZE]
+        self.e: int
+        self.n: int
+        self.seq: int
+        self.pubkey = ''
+        self.jsessionId = ''
+        self.token = ''
+        super(WR841NTplinkDeviceScanner, self).__init__(config)
+
+    def _get_pub_key(self) -> typing.Union[typing.Tuple[int, int, int], None]:
+        # Requests the public key and sequence from the router.
+        url = 'http://{}/cgi?8'.format(self.host)
+        referer = 'http://{}'.format(self.host)
+        data = "[/cgi/getParm#0,0,0,0,0,0#0,0,0,0,0,0]0,0\r\n"
+
+        response = requests.post(url, headers={ 'Referer': referer}, data=data)
+        if not response.status_code == 200:
+            return False
+
+        ee = self._get_field_from_router_response(response.text, 'ee')
+        nn = self._get_field_from_router_response(response.text, 'nn')
+        seq = self._get_field_from_router_response(response.text, 'seq')
+
+        _LOGGER.debug(f"[+] RSA n: {nn}")
+        _LOGGER.debug(f"[+] RSA e: {ee}")
+        _LOGGER.debug(f"[+] Sequence: {seq}")
+
+        try:
+            e = int(ee, 16)
+            n = int(nn, 16)  #snipped for brevity
+            seq = int(seq, 10)
+        except ValueError:
+            return None
+
+        return e, n, seq
+
+    def _get_field_from_router_response(self, rText, key):
+        lines = rText.split('\n')
+        for line in lines:
+            if (line.startswith('var '+ key)):
+                # var ee="010101" => "010101"
+                return line.split('=\"')[1].split('\";')[0]
+        return ''
+
+    def _get_jsession_id(self):
+
+        # Get the RSA public key parameters and the sequence
+        #rsa_vals = self._get_pub_key(s)
+        #if rsa_vals is None:
+        #    _LOGGER.error("[-] Failed to get RSA public key and sequence values")
+        #    return False
+
+        # Create the data field
+        login_data = f"8\r\n[/cgi/login#0,0,0,0,0,0#0,0,0,0,0,0]0,2\r\nusername={self.username}\r\npassword={self.password}\r\n"
+        data_ciphertext = self._aes_encrypt(login_data.encode())
+        data = base64.b64encode(data_ciphertext).decode()
+
+         # Create the sign field
+        sign = self._rsa_encrypt(self.e, self.n, self.seq, data)
+
+        # Send the authentication request
+        url = 'http://{}/cgi_gdpr'.format(self.host)
+
+        referer = 'http://{}'.format(self.host)
+        headers= { "Referer": referer }
+
+        request_data = f"sign={sign.hex()}\r\ndata={data}\r\n"
+
+        response = requests.post(url, headers=headers, data=request_data)
+        
+        if not response.status_code == 200:
+            _LOGGER.error("Error %s from router", response.text)
+            return False
+        
+        self.jsessionId = dict(response.cookies)['JSESSIONID']
+
+        decrypted_response = self._aes_decrypt(response.text)
+        _LOGGER.debug(decrypted_response)
+
+        return True
+
+    def _pad(self, s):
+        return s + (self.BLOCK_SIZE - len(s) % self.BLOCK_SIZE) * chr(self.BLOCK_SIZE - len(s) % self.BLOCK_SIZE)
+
+    def _aes_encrypt(self, plaintext: bytes) -> bytes:
+        aes_key = self.AES_KEY.encode("utf-8")
+        aes_iv = self.AES_IV.encode("utf-8")
+        pad_plaintext = pad(plaintext, self.BLOCK_SIZE)
+        cipher = AES.new(aes_key, AES.MODE_CBC, aes_iv)
+        ciphertext = cipher.encrypt(pad_plaintext)
+        return ciphertext
+
+    def _aes_decrypt(self, response_text: str) -> bytes:
+         # Decode the Base64 encoded response
+        decoded: bytes = base64.b64decode(response_text)
+
+        aes_key = self.AES_KEY.encode("utf-8")
+        aes_iv = self.AES_IV.encode("utf-8")
+        pad_plaintext = pad(decoded, self.BLOCK_SIZE)
+        cipher = AES.new(aes_key, AES.MODE_CBC, aes_iv)
+        decrypted_resp = cipher.decrypt(decoded)
+
+        # Remove the PKCS #7 padding
+        num_padding_bytes = int(decrypted_resp[-1])
+        decrypted_resp = decrypted_resp[:-num_padding_bytes]
+
+        decrypted_resp_str: str = decrypted_resp.decode()
+
+        return decrypted_resp_str
+
+    def _rsa_encrypt(self, e: int, n: int, seq: int, data: bytes) -> bytes:
+        """
+        RSA encrypts plaintext. TP-Link breaks the plaintext down into 64 byte blocks and concatenates the output.
+        :param e: The RSA public key's e value
+        :param n: The RSA public key's n value
+        :param seq: Sequence value + data length
+        :param plaintext: The data to encrypt
+        :return: RSA encrypted ciphertext
+        """
+        seq_with_data_len = seq + len(data)
+        auth_hash = hashlib.md5(f"{self.username}{self.password}".encode()).digest()
+        # The string __must__ be null terminated, otherwise strlen gets the wrong size
+        plaintext = f"key={self.AES_KEY}&iv={self.AES_IV}&h={auth_hash.hex()}&s={seq_with_data_len}\x00\r\n".encode()
+    
+        rsa_block_size = 64  # This is set by the router
+        # Align the input with the block size since PKCS1 padding is not used
+        if len(plaintext) % rsa_block_size != 0:
+            plaintext += b"\x00" * (rsa_block_size - (len(plaintext) % rsa_block_size))
+        num_blocks = int(len(plaintext) / rsa_block_size)
+        ciphertext = bytes()
+        block_start = 1
+        block_end = rsa_block_size
+        for block_itr in range(num_blocks):
+            # RSA encrypt manually because the cryptography package does not allow RSA without padding because it's unsafe
+            plaintext_num = int.from_bytes(plaintext[block_start - 1:block_end], byteorder="big")
+            ciphertext_num = pow(plaintext_num, e, n)
+            ciphertext += ciphertext_num.to_bytes(math.ceil(n.bit_length() / 8), byteorder="big")
+            block_start += rsa_block_size
+            block_end += rsa_block_size
+        return ciphertext
+
+    def _get_auth_tokens(self):
+        """Retrieve auth tokens from the router."""
+
+        _LOGGER.info("Retrieving RSA public key parameters and the sequence...")
+        rsa_vals = self._get_pub_key()
+        if not rsa_vals:
+            return False
+        self.e, self.n, self.seq = rsa_vals
+
+        _LOGGER.info("Retrieving JSessionID...")
+        jsessionId = self._get_jsession_id()
+        if not jsessionId:
+            return False
+
+        return True
+
+    def _get_mac_results(self):
+        url = 'http://{}/cgi_gdpr'.format(self.host)
+        referer = 'http://{}/'.format(self.host)
+        headers= {
+            "Referer": referer,
+            "Cookie": 'JSESSIONID=' + self.jsessionId
+            }
+
+        mac_results = []
+
+        # Check both the 2.4GHz and 5GHz client lists.
+        for clients_frequency in ('1', '2'):
+            
+            request_string = f"7\r\n[ACT_WLAN_UPDATE_ASSOC#1,{clients_frequency},0,0,0,0#0,0,0,0,0,0]0,0\r\n"
+            data_ciphertext = self._aes_encrypt(request_string.encode())
+            data = base64.b64encode(data_ciphertext).decode()
+            sign = self._rsa_encrypt(self.e, self.n, self.seq, data)
+            
+            request_data = f"sign={sign.hex()}\r\ndata={data}\r\n"
+
+            page = requests.post(url, headers=headers, data=request_data, timeout=4)
+            if not page.status_code == 200:
+                _LOGGER.error("Error %s from router", page.status_code)
+                return False
+            
+            decrypted_response = self._aes_decrypt(page.text)
+            _LOGGER.debug(decrypted_response)
+
+            # Retrieve associated clients.
+            request_string = f"6\r\n[LAN_WLAN_ASSOC_DEV#0,0,0,0,0,0#1,{clients_frequency},0,0,0,0]0,1\r\nAssociatedDeviceMACAddress\r\n"
+            data_ciphertext = self._aes_encrypt(request_string.encode())
+            data = base64.b64encode(data_ciphertext).decode()
+            sign = self._rsa_encrypt(self.e, self.n, self.seq, data)
+
+            request_data = f"sign={sign.hex()}\r\ndata={data}\r\n"
+
+            page = requests.post(url, headers=headers, data=request_data, timeout=4)
+
+            if not page.status_code == 200:
+                _LOGGER.error("Error %s from router", page.status_code)
+                return False
+
+            decrypted_response = self._aes_decrypt(page.text)
+            _LOGGER.debug(decrypted_response)
+
+            mac_results.extend(self.parse_macs_colons.findall(decrypted_response))
+    
+        self.last_results = mac_results
+        return True
+
+    def _update_info(self):
+        """Ensure the information from the TP-Link router is up to date.
+        Return boolean if scanning successful.
+        """
+        _LOGGER.info("[WR841N] Loading wireless clients...")
+
+        if (self.jsessionId == '') or (self.token == ''):
+            gotToken = self._get_auth_tokens()
+            if not gotToken:
+                # Retry
+                _LOGGER.info("Failed to get AuthTokens. Retrying in 3 secs.")
+                time.sleep(3)
+                gotToken = self._get_auth_tokens()
+        else:
+            gotToken = True
+
+        if not gotToken:
+            """ In case of failure - force re-login """
+            self.jsessionId = ''
+            self.token = ''
+            return False
+
+        macResults = self._get_mac_results()
+        if not macResults:
+            """ In case of failure - force re-login """
+            self.jsessionId = ''
+            self.token = ''
+            return False
+        return True
