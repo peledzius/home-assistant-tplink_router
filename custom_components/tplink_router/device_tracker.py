@@ -842,10 +842,8 @@ class WR841NTplinkDeviceScanner(TplinkDeviceScanner):
     def _get_mac_results(self):
         url = 'http://{}/cgi_gdpr'.format(self.host)
         referer = 'http://{}/'.format(self.host)
-        headers= {
-            "Referer": referer,
-            "Cookie": 'JSESSIONID=' + self.jsessionId
-            }
+        headers = { "Referer": referer }
+        cookies =  { "JSESSIONID": self.jsessionId }
 
         mac_results = []
 
@@ -859,7 +857,7 @@ class WR841NTplinkDeviceScanner(TplinkDeviceScanner):
             
             request_data = f"sign={sign.hex()}\r\ndata={data}\r\n"
 
-            page = requests.post(url, headers=headers, data=request_data, timeout=4)
+            page = requests.post(url, headers=headers, cookies=cookies, data=request_data, timeout=4)
             if not page.status_code == 200:
                 _LOGGER.error("Error %s from router", page.status_code)
                 return False
@@ -875,7 +873,7 @@ class WR841NTplinkDeviceScanner(TplinkDeviceScanner):
 
             request_data = f"sign={sign.hex()}\r\ndata={data}\r\n"
 
-            page = requests.post(url, headers=headers, data=request_data, timeout=4)
+            page = requests.post(url, headers=headers, cookies=cookies, data=request_data, timeout=4)
 
             if not page.status_code == 200:
                 _LOGGER.error("Error %s from router", page.status_code)
